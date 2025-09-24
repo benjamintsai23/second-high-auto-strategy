@@ -189,7 +189,7 @@ jobs:
           RETRY_COUNT=$((RETRY_COUNT + 1))
           echo "=== 執行嘗試 $RETRY_COUNT/$MAX_RETRIES ==="
           
-          if python strategy_bot_v2.py 2>&1 | tee logs/execution_$RETRY_COUNT.log; then
+          if ls -la && python strategy_bot_v2.py 2>&1 | tee logs/execution_$RETRY_COUNT.log; then
             echo "✅ 策略執行成功"
             SUCCESS=true
           else
