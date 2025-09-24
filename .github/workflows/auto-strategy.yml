@@ -5,7 +5,7 @@ on:
   schedule:
     - cron: '0 13 * * 1-5'  # 週一到週五 21:00 台灣時間
     
-  # 手動測試觸發（保留測試功能）
+  # 手動測試觸發
   workflow_dispatch:
     inputs:
       force_weekend:
@@ -71,13 +71,31 @@ jobs:
         echo "👤 執行者: ${{ github.actor }}"
         echo "🆔 執行 ID: ${{ github.run_id }}"
         
+    - name: 檢查檔案結構
+      if: steps.check_conditions.outputs.should_run == 'true'
+      run: |
+        echo "📁 檢查檔案結構..."
+        echo "當前工作目錄: $(pwd)"
+        echo "檔案列表:"
+        ls -la
+        echo ""
+        echo "Python 檔案:"
+        find . -name "*.py" -type f
+        
     - name: 安裝 Python 依賴
       if: steps.check_conditions.outputs.should_run == 'true'
       run: |
         echo "📦 安裝必要套件..."
         python -m pip install --upgrade pip
-        pip install pandas numpy finlab python-telegram-bot python-dotenv pydantic requests
-        pip install pytz python-dateutil
+        
+        # 檢查是否有 requirements.txt
+        if [ -f "requirements.txt" ]; then
+          echo "使用 requirements.txt 安裝套件..."
+          pip install -r requirements.txt
+        else
+          echo "直接安裝必要套件..."
+          pip install pandas numpy finlab python-telegram-bot python-dotenv pydantic requests pytz python-dateutil
+        fi
         echo "✅ 套件安裝完成"
         
     - name: 驗證 API 連接
@@ -123,16 +141,6 @@ jobs:
             if close_data is not None and not close_data.empty:
                 print(f'✅ 價格資料: {close_data.shape[1]} 檔股票')
                 print(f'📅 最新日期: {close_data.index[-1]}')
-                
-                # 測試營收資料
-                try:
-                    revenue_data = data.get('monthly_revenue:當月營收')
-                    if revenue_data is not None and not revenue_data.empty:
-                        print(f'✅ 營收資料: {revenue_data.shape[1]} 檔公司')
-                    else:
-                        print('⚠️ 營收資料為空')
-                except Exception as e:
-                    print(f'⚠️ 營收資料取得警告: {e}')
             else:
                 print('❌ 無法取得價格資料')
                 sys.exit(1)
@@ -180,6 +188,30 @@ jobs:
         # 建立日誌目錄
         mkdir -p logs
         
+        # 自動找到 Python 主程式檔案
+        PYTHON_FILE=""
+        
+        # 按照優先順序尋找 Python 檔案
+        if [ -f "strategy_bot_v2.py" ]; then
+          PYTHON_FILE="strategy_bot_v2.py"
+        elif [ -f "main.py" ]; then
+          PYTHON_FILE="main.py"
+        elif [ -f "bot.py" ]; then
+          PYTHON_FILE="bot.py"
+        else
+          # 找第一個 Python 檔案
+          PYTHON_FILE=$(find . -maxdepth 1 -name "*.py" -type f | head -1)
+        fi
+        
+        if [ -z "$PYTHON_FILE" ]; then
+          echo "❌ 找不到 Python 主程式檔案"
+          echo "📁 當前目錄檔案："
+          ls -la
+          exit 1
+        fi
+        
+        echo "📝 使用 Python 檔案: $PYTHON_FILE"
+        
         # 執行主程式（帶重試機制）
         MAX_RETRIES=3
         RETRY_COUNT=0
@@ -189,12 +221,16 @@ jobs:
           RETRY_COUNT=$((RETRY_COUNT + 1))
           echo "=== 執行嘗試 $RETRY_COUNT/$MAX_RETRIES ==="
           
-          if ls -la && python strategy_bot_v2.py 2>&1 | tee logs/execution_$RETRY_COUNT.log; then
+          if python "$PYTHON_FILE" 2>&1 | tee logs/execution_$RETRY_COUNT.log; then
             echo "✅ 策略執行成功"
             SUCCESS=true
           else
             EXIT_CODE=$?
             echo "❌ 執行失敗，退出碼: $EXIT_CODE"
+            
+            # 顯示錯誤日誌的最後幾行
+            echo "最後的錯誤訊息："
+            tail -10 logs/execution_$RETRY_COUNT.log
             
             if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
               DELAY=$((RETRY_COUNT * 15))
@@ -206,6 +242,40 @@ jobs:
         
         if [ "$SUCCESS" = false ]; then
           echo "💥 重試次數已達上限，執行最終失敗"
+          
+          # 發送失敗通知到 Telegram
+          python << 'NOTIFY_EOF'
+        import os
+        import requests
+        from datetime import datetime
+        
+        token = os.getenv('TELEGRAM_BOT_TOKEN')
+        chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        
+        if token and chat_id:
+            message = f"""❌ 策略機器人執行失敗
+        
+        ⏰ 失敗時間: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        🔧 執行模式: 自動排程
+        📊 重試次數: 3次全部失敗
+        
+        🔗 查看詳情: https://github.com/{os.getenv('GITHUB_REPOSITORY')}/actions/runs/{os.getenv('GITHUB_RUN_ID')}
+        
+        請檢查：
+        • FinLab API Token 是否有效
+        • 網路連接是否正常
+        • 程式碼是否有錯誤
+        """
+            
+            try:
+                url = f"https://api.telegram.org/bot{token}/sendMessage"
+                data = {"chat_id": chat_id, "text": message}
+                requests.post(url, data=data, timeout=10)
+                print("✅ 失敗通知已發送到 Telegram")
+            except Exception as e:
+                print(f"❌ 無法發送失敗通知: {e}")
+        NOTIFY_EOF
+        
           exit 1
         fi
         
@@ -222,7 +292,43 @@ jobs:
         
     - name: 週末跳過通知
       if: steps.check_conditions.outputs.should_run == 'false'
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         echo "🗓️ 今日為週末，策略分析已跳過"
         echo "📅 下次執行: 下週一晚上 21:00"
-        echo "✨ 祝您週末愉快！"
+        
+        # 發送週末跳過通知到 Telegram
+        python << 'WEEKEND_EOF'
+        import os
+        import requests
+        from datetime import datetime
+        
+        token = os.getenv('TELEGRAM_BOT_TOKEN')
+        chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        
+        if token and chat_id:
+            message = f"""🗓️ 週末休市通知
+        
+        📅 {datetime.now().strftime('%Y年%m月%d日')} 為週末
+        
+        💡 策略機器人自動跳過執行
+        ⏰ 下次執行：週一晚上 21:00
+        
+        📈 利用週末時間：
+        • 檢視本週操作績效
+        • 關注國際市場動態
+        • 準備下週投資策略
+        
+        祝您週末愉快！ 🌟
+        """
+            
+            try:
+                url = f"https://api.telegram.org/bot{token}/sendMessage"
+                data = {"chat_id": chat_id, "text": message}
+                requests.post(url, data=data, timeout=10)
+                print("✅ 週末通知已發送到 Telegram")
+            except Exception as e:
+                print(f"❌ 無法發送週末通知: {e}")
+        WEEKEND_EOF
