@@ -1,0 +1,228 @@
+name: 二次創新高策略-每晚21點自動推播
+
+on:
+  # 每晚 21:00 台灣時間 (UTC 13:00) 自動執行，僅工作日
+  schedule:
+    - cron: '0 13 * * 1-5'  # 週一到週五 21:00 台灣時間
+    
+  # 手動測試觸發（保留測試功能）
+  workflow_dispatch:
+    inputs:
+      force_weekend:
+        description: '強制在週末執行'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  TIMEZONE: 'Asia/Taipei'
+
+jobs:
+  strategy-analysis:
+    name: 二次創新高策略分析
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    
+    steps:
+    - name: 檢出代碼
+      uses: actions/checkout@v4
+      
+    - name: 設定 Python 環境
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        
+    - name: 檢查執行條件
+      id: check_conditions
+      run: |
+        echo "=== 執行條件檢查 ==="
+        
+        # 取得台灣時間
+        TW_TIME=$(TZ=Asia/Taipei date)
+        TW_WEEKDAY=$(TZ=Asia/Taipei date +%u)  # 1=週一, 7=週日
+        TW_DATE=$(TZ=Asia/Taipei date +%Y-%m-%d)
+        TW_HOUR=$(TZ=Asia/Taipei date +%H)
+        
+        echo "🇹🇼 台灣時間: $TW_TIME"
+        echo "📅 週幾: $TW_WEEKDAY (1=週一, 7=週日)"
+        echo "🕘 時間: $TW_HOUR 點"
+        
+        # 檢查是否為工作日
+        if [ "$TW_WEEKDAY" -ge "6" ]; then
+          echo "⚠️ 今日為週末"
+          if [ "${{ github.event.inputs.force_weekend }}" == "true" ]; then
+            echo "🔧 強制執行模式啟用"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 週末不執行，程序結束"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "✅ 工作日，符合執行條件"
+          echo "should_run=true" >> $GITHUB_OUTPUT
+        fi
+        
+        # 輸出環境資訊
+        echo ""
+        echo "=== 環境資訊 ==="
+        echo "🤖 觸發方式: ${{ github.event_name }}"
+        echo "🌿 分支: ${{ github.ref_name }}"
+        echo "👤 執行者: ${{ github.actor }}"
+        echo "🆔 執行 ID: ${{ github.run_id }}"
+        
+    - name: 安裝 Python 依賴
+      if: steps.check_conditions.outputs.should_run == 'true'
+      run: |
+        echo "📦 安裝必要套件..."
+        python -m pip install --upgrade pip
+        pip install pandas numpy finlab python-telegram-bot python-dotenv pydantic requests
+        pip install pytz python-dateutil
+        echo "✅ 套件安裝完成"
+        
+    - name: 驗證 API 連接
+      if: steps.check_conditions.outputs.should_run == 'true'
+      env:
+        FINLAB_API_TOKEN: ${{ secrets.FINLAB_API_TOKEN }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: |
+        echo "🔍 驗證 API 連接狀態..."
+        
+        python << 'EOF'
+        import os
+        import sys
+        
+        print("1️⃣ 檢查環境變數...")
+        
+        # 檢查 FinLab Token
+        finlab_token = os.getenv('FINLAB_API_TOKEN')
+        if not finlab_token:
+            print('❌ FINLAB_API_TOKEN 未設定')
+            sys.exit(1)
+        print(f'✅ FinLab Token: {len(finlab_token)} 字元')
+        
+        # 檢查 Telegram 設定
+        tg_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        tg_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        if not tg_token or not tg_chat_id:
+            print('❌ Telegram 設定不完整')
+            sys.exit(1)
+        print(f'✅ Telegram Token: {len(tg_token)} 字元')
+        print(f'✅ Chat ID: {tg_chat_id}')
+        
+        print("\n2️⃣ 測試 FinLab 連接...")
+        try:
+            import finlab
+            finlab.login(finlab_token)
+            print('✅ FinLab 登入成功')
+            
+            # 測試資料取得
+            from finlab import data
+            close_data = data.get('price:收盤價')
+            if close_data is not None and not close_data.empty:
+                print(f'✅ 價格資料: {close_data.shape[1]} 檔股票')
+                print(f'📅 最新日期: {close_data.index[-1]}')
+                
+                # 測試營收資料
+                try:
+                    revenue_data = data.get('monthly_revenue:當月營收')
+                    if revenue_data is not None and not revenue_data.empty:
+                        print(f'✅ 營收資料: {revenue_data.shape[1]} 檔公司')
+                    else:
+                        print('⚠️ 營收資料為空')
+                except Exception as e:
+                    print(f'⚠️ 營收資料取得警告: {e}')
+            else:
+                print('❌ 無法取得價格資料')
+                sys.exit(1)
+                
+        except Exception as e:
+            print(f'❌ FinLab 連接失敗: {e}')
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+            
+        print("\n3️⃣ 測試 Telegram 連接...")
+        import requests
+        try:
+            url = f"https://api.telegram.org/bot{tg_token}/getMe"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                bot_info = response.json()
+                print(f"✅ Telegram Bot: {bot_info['result']['first_name']}")
+                print(f"   用戶名: @{bot_info['result']['username']}")
+            else:
+                print(f"❌ Telegram API 錯誤: {response.status_code}")
+                sys.exit(1)
+        except Exception as e:
+            print(f"❌ Telegram 連接失敗: {e}")
+            sys.exit(1)
+        
+        print("\n✅ 所有 API 連接正常，準備執行策略分析")
+        EOF
+        
+    - name: 執行策略分析
+      if: steps.check_conditions.outputs.should_run == 'true'
+      env:
+        FINLAB_API_TOKEN: ${{ secrets.FINLAB_API_TOKEN }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        GITHUB_RUN_ID: ${{ github.run_id }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        EXECUTION_MODE: "auto_schedule"
+      run: |
+        echo "🚀 開始執行二次創新高策略分析..."
+        echo "⏰ 執行時間: $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S')"
+        echo "📊 執行模式: 自動排程"
+        
+        # 建立日誌目錄
+        mkdir -p logs
+        
+        # 執行主程式（帶重試機制）
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        SUCCESS=false
+        
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$SUCCESS" = false ]; do
+          RETRY_COUNT=$((RETRY_COUNT + 1))
+          echo "=== 執行嘗試 $RETRY_COUNT/$MAX_RETRIES ==="
+          
+          if python strategy_bot_v2.py 2>&1 | tee logs/execution_$RETRY_COUNT.log; then
+            echo "✅ 策略執行成功"
+            SUCCESS=true
+          else
+            EXIT_CODE=$?
+            echo "❌ 執行失敗，退出碼: $EXIT_CODE"
+            
+            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+              DELAY=$((RETRY_COUNT * 15))
+              echo "⏳ ${DELAY}秒後重試..."
+              sleep $DELAY
+            fi
+          fi
+        done
+        
+        if [ "$SUCCESS" = false ]; then
+          echo "💥 重試次數已達上限，執行最終失敗"
+          exit 1
+        fi
+        
+        echo "🎉 策略分析完成"
+        
+    - name: 上傳執行記錄
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: execution-logs-${{ github.run_id }}
+        path: logs/
+        retention-days: 7
+        if-no-files-found: ignore
+        
+    - name: 週末跳過通知
+      if: steps.check_conditions.outputs.should_run == 'false'
+      run: |
+        echo "🗓️ 今日為週末，策略分析已跳過"
+        echo "📅 下次執行: 下週一晚上 21:00"
+        echo "✨ 祝您週末愉快！"
