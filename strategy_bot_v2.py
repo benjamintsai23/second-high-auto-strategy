@@ -354,20 +354,20 @@ class AutomatedSecondHighStrategy:
         """格式化結果訊息"""
         if results_df.empty:
             return [f"""📊 {self.name} {self.version}
-            
+
 ⏰ 分析時間: {self.get_tw_time()}
 
 ❌ 今日無股票完全符合8大條件
 
 🔍 完整8大條件:
-1. ✅ 創60日新高
-2. ✅ 前30日有整理期  
-3. ✅ 歷史強勢確認
-4. ✅ 真正突破確認
-5. ✅ 長期趨勢向上
-6. ✅ 中期趨勢向上
-7. ✅ 營收成長加速
-8. ✅ 成交量放大確認
+1. 創60日新高
+2. 前30日有整理期  
+3. 歷史強勢確認
+4. 真正突破確認
+5. 長期趨勢向上
+6. 中期趨勢向上
+7. 營收成長加速
+8. 成交量放大確認
 
 💡 建議: 持續關注，等待更好的進場時機"""]
         
@@ -450,13 +450,16 @@ class AutomatedSecondHighStrategy:
         try:
             url = f"https://api.telegram.org/bot{self.telegram_token}/sendMessage"
             
+            # 清理訊息格式，移除可能的問題字符
+            cleaned_message = message.strip()
+            
             # 分割長訊息
-            max_length = 4096
-            if len(message) <= max_length:
-                messages = [message]
+            max_length = 4000  # 降低限制，確保安全
+            if len(cleaned_message) <= max_length:
+                messages = [cleaned_message]
             else:
                 messages = []
-                lines = message.split('\n')
+                lines = cleaned_message.split('\n')
                 current_msg = ""
                 
                 for line in lines:
@@ -476,8 +479,7 @@ class AutomatedSecondHighStrategy:
                 try:
                     data = {
                         "chat_id": self.telegram_chat_id,
-                        "text": msg,
-                        "parse_mode": "HTML" if "<" in msg else None
+                        "text": msg
                     }
                     
                     response = requests.post(url, data=data, timeout=30)
@@ -487,6 +489,7 @@ class AutomatedSecondHighStrategy:
                         print(f"✅ 訊息片段 {i+1}/{len(messages)} 發送成功")
                     else:
                         print(f"❌ 訊息片段 {i+1} 發送失敗: {response.status_code}")
+                        print(f"回應內容: {response.text}")
                     
                     # 避免觸發頻率限制
                     if i < len(messages) - 1:
@@ -495,12 +498,11 @@ class AutomatedSecondHighStrategy:
                 except Exception as e:
                     print(f"❌ 發送訊息片段 {i+1} 時出錯: {e}")
             
-            success_rate = success_count / len(messages)
-            if success_rate >= 0.8:  # 80%以上成功視為整體成功
+            if success_count > 0:
                 print(f"✅ Telegram 訊息發送完成 ({success_count}/{len(messages)})")
                 return True
             else:
-                print(f"⚠️ Telegram 訊息發送部分失敗 ({success_count}/{len(messages)})")
+                print(f"❌ Telegram 訊息發送完全失敗")
                 return False
             
         except Exception as e:
@@ -535,20 +537,23 @@ class AutomatedSecondHighStrategy:
             # 5. 格式化並發送結果
             messages = self.format_results_message(results_df)
             
-            all_success = True
+            success_count = 0
             for message in messages:
                 success = self.send_telegram_message(message)
-                if not success:
-                    all_success = False
+                if success:
+                    success_count += 1
                 time.sleep(2)  # 訊息間隔
+            
+            # 只要有一個訊息發送成功，就視為部分成功
+            overall_success = success_count > 0
             
             print(f"\n{'='*50}")
             print(f"✅ 分析完成: {self.get_tw_time()}")
             print(f"📊 符合條件股票: {len(results_df) if not results_df.empty else 0} 檔")
-            print(f"📱 Telegram 發送: {'成功' if all_success else '部分失敗'}")
+            print(f"📱 Telegram 發送: {'成功' if overall_success else '失敗'} ({success_count}/{len(messages)})")
             print(f"{'='*50}\n")
             
-            return all_success
+            return overall_success
             
         except Exception as e:
             error_msg = f"❌ 策略執行失敗: {str(e)}"
